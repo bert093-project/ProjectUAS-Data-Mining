@@ -104,6 +104,7 @@ export default function Page() {
   }
 
   // API call to run evaluation (split only)
+// ganti seluruh function runEval lama dengan ini
   async function runEval(cfg: { mode: 'split'; trainPercent: number }) {
     if (!data) {
       alert('No dataset loaded');
@@ -124,55 +125,107 @@ export default function Page() {
     setRecommendedItems([] as ScoredItem[]);
 
     try {
-      const payload = {
-        data,
-        featureColumns,
-        targetColumn,
-        eval: cfg
-      };
-      console.log('[runEval] payload:', { featureColumns, targetColumn, trainPercent: cfg.trainPercent, rows: (data || []).length });
+      // salin data supaya tidak mengubah state asli
+      const dataCopy = (data || []).map((r) => ({ ...r }));
 
-      const res = await fetch('/api/naive-bayes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      // jika user memilih price_idr sebagai target, buat price_class otomatis
+      let effectiveTarget = targetColumn;
+      const numericPriceKeys = ['price_idr', 'price', 'price_id'];
+      if (targetColumn === 'price_idr' || numericPriceKeys.includes(targetColumn || '')) {
+        // thresholds: cheap <5M, mid 5M-17M, premium >17M
+        dataCopy.forEach((row) => {
+          const raw = row['price_idr'] ?? row['price'] ?? row['price_id'] ?? null;
+          const n = (() => {
+            if (raw === null || raw === undefined) return NaN;
+            if (typeof raw === 'number') return raw;
+            const s = String(raw).replace(/[^\d.-]/g, '');
+            const v = parseFloat(s);
+            return Number.isFinite(v) ? v : NaN;
+          })();
+          let cls = 'mid';
+          if (!Number.isFinite(n)) cls = 'mid';
+          else if (n < 5_000_000) cls = 'cheap';
+          else if (n > 17_000_000) cls = 'premium';
+          else cls = 'mid';
+          // tulis kolom baru
+          (row as any).price_class = cls;
+        });
+        effectiveTarget = 'price_class';
 
-      console.log('[runEval] response status:', res.status, res.statusText);
+        // pastikan effectiveTarget bukan di featureColumns
+        const featuresNoTarget = featureColumns.filter(c => c !== 'price_idr' && c !== 'price' && c !== 'price_id' && c !== effectiveTarget);
+        // prepare payload
+        const payload = {
+          data: dataCopy,
+          featureColumns: featuresNoTarget,
+          targetColumn: effectiveTarget,
+          eval: cfg
+        };
 
-      const json = await res.json().catch((e) => {
-        console.error('[runEval] failed to parse JSON:', e);
-        return null;
-      });
+        console.log('[runEval] using derived target price_class; payload sample:', payload.featureColumns, payload.targetColumn, { rows: dataCopy.length });
 
-      console.log('[runEval] response json:', json);
+        const res = await fetch('/api/naive-bayes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
 
-      if (!res.ok) {
-        const msg = (json && (json as any).error) ? String((json as any).error) : `HTTP ${res.status}`;
-        setApiError(msg);
-        alert(`Evaluation failed: ${msg}`);
-        setApiResult(null);
+        const json = await res.json().catch(e => {
+          console.error('[runEval] failed parse JSON', e);
+          return null;
+        });
+        console.log('[runEval] response status:', res.status, res.statusText);
+        console.log('[runEval] response json:', json);
+
+        if (!res.ok) {
+          const msg = json && json.error ? String(json.error) : `HTTP ${res.status}`;
+          setApiError(msg);
+          alert(`Evaluation failed: ${msg}`);
+          setApiResult(null);
+          return;
+        }
+        setApiResult(json as ApiResponse);
+        // set budget label default
+        setBudgetLabel('mid');
+        setActiveTab('performance');
         return;
-      }
-
-      setApiResult(json as ApiResponse);
-      setApiError(null);
-
-      const classes = json && typeof json === 'object' && 'model' in json && Array.isArray((json as any).model.classes)
-        ? (json as any).model.classes as string[]
-        : [];
-
-      if (classes.length > 0) setBudgetLabel(classes[0]);
-      setActiveTab('performance');
-    } catch (err) {
-      console.error('[runEval] error:', err);
-      const msg = err instanceof Error ? err.message : String(err);
-      setApiError(msg);
-      alert(`Evaluation error: ${msg}`);
-    } finally {
-      setLoading(false);
     }
+
+    // jika bukan price_idr target -> perilaku lama, pastikan fitur tidak mengandung target
+    const featuresNoTarget = featureColumns.filter(c => c !== targetColumn);
+    const payload = { data: dataCopy, featureColumns: featuresNoTarget, targetColumn, eval: cfg };
+    console.log('[runEval] payload:', { featureColumns: featuresNoTarget, targetColumn, trainPercent: cfg.trainPercent, rows: dataCopy.length });
+
+    const res = await fetch('/api/naive-bayes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json().catch(e => {
+      console.error('[runEval] failed parse JSON', e);
+      return null;
+    });
+    console.log('[runEval] response status:', res.status, res.statusText);
+    console.log('[runEval] response json:', json);
+
+    if (!res.ok) {
+      const msg = json && json.error ? String(json.error) : `HTTP ${res.status}`;
+      setApiError(msg);
+      alert(`Evaluation failed: ${msg}`);
+      setApiResult(null);
+      return;
+    }
+    setApiResult(json as ApiResponse);
+    setActiveTab('performance');
+  } catch (err) {
+    console.error('[runEval] error:', err);
+    const msg = err instanceof Error ? err.message : String(err);
+    setApiError(msg);
+    alert(`Evaluation error: ${msg}`);
+  } finally {
+    setLoading(false);
   }
+}
 
 
   // recommendation helpers
@@ -238,7 +291,7 @@ export default function Page() {
     } else if (budgetLabel) {
       rec = recommendByLabel(budgetLabel);
     } else {
-      alert('Set budget number or select a budget class');
+      alert('Set budget number or select a price class (cheap/mid/premium)');
       return;
     }
     setRecommendedItems(rec);
@@ -253,7 +306,6 @@ export default function Page() {
     }
     if (!apiResult) return <div className="text-sm text-slate-600">No evaluation run yet.</div>;
 
-    // Only split mode supported in current UI
     if ('mode' in apiResult && apiResult.mode === 'split') {
       const sp = apiResult as SplitResponse;
       const accuracyPct = ((sp.eval?.accuracy ?? 0) * 100);
