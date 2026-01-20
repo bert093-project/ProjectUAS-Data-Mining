@@ -8,6 +8,11 @@ import RecommendedList from './components/RecommendedList';
 import type { DataRow } from './naive-bayes/model';
 import { detectColumnTypes, inferCandidateTarget } from './utils/dataUtils';
 
+/**
+ * Note: contoh dataset yang diunggah tersedia pada file upload
+ * (converted JSON/CSV) — lihat: :contentReference[oaicite:1]{index=1}
+ */
+
 type SplitResponse = {
   mode: 'split';
   counts: { total: number; train: number; test: number };
@@ -27,7 +32,7 @@ type SplitResponse = {
 
 type ApiResponse = SplitResponse | { error?: string };
 
-/** ScoredItem used for RecommendedList: required props enforced */
+/** ScoredItem used for RecommendedList: require predictedLabel & probabilities */
 type ScoredItem = DataRow & {
   predictedLabel: string;
   probabilities: Record<string, number>;
@@ -49,9 +54,10 @@ export default function Page() {
   const [apiResult, setApiResult] = useState<ApiResponse | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
 
-  // recommendation state — now using ScoredItem to satisfy RecommendedList prop
+  // recommendation state — use ScoredItem type
   const [budget, setBudget] = useState<number | null>(null);
-  const [budgetLabel, setBudgetLabel] = useState<string>('');
+  // default budgetLabel is price-class selection (cheap/mid/premium)
+  const [budgetLabel, setBudgetLabel] = useState<string>('mid');
   const [topN, setTopN] = useState<number>(5);
   const [recommendedItems, setRecommendedItems] = useState<ScoredItem[]>([]);
 
@@ -78,6 +84,23 @@ export default function Page() {
   }
   function handleColumnTypes(types: Record<string, 'numeric' | 'categorical'>) {
     setColumnTypes(types);
+  }
+
+  // Helper parse number safely
+  function parseNumberSafe(v: unknown): number {
+    if (v === null || v === undefined) return NaN;
+    if (typeof v === 'number') return v;
+    const s = String(v).replace(/[^\d.-]/g, '');
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : NaN;
+  }
+
+  // Price-to-label mapping (user requested premium if price > 17,000,000)
+  function priceToLabel(price: number): 'cheap' | 'mid' | 'premium' {
+    if (!Number.isFinite(price)) return 'mid';
+    if (price < 5_000_000) return 'cheap';
+    if (price > 17_000_000) return 'premium';
+    return 'mid';
   }
 
   // API call to run evaluation (split only)
@@ -151,38 +174,62 @@ export default function Page() {
     }
   }
 
+
   // recommendation helpers
-  function priceToLabel(price: number): string {
-    if (!Number.isFinite(price)) return budgetLabel || '';
-    if (price < 5_000_000) return 'cheap';
-    if (price < 12_000_000) return 'mid';
-    return 'premium';
-  }
-
-  function recommendByLabel(label: string) {
+  function recommendByLabel(label: string): ScoredItem[] {
     if (!apiResult) return [] as ScoredItem[];
-    if (!('scoredItems' in apiResult) || !Array.isArray((apiResult as any).scoredItems)) return [] as ScoredItem[];
-    const items = (apiResult as any).scoredItems as (DataRow & { predictedLabel?: string; probabilities?: Record<string, number> })[];
 
-    // normalize to ScoredItem (ensure required fields exist)
-    const normalized: ScoredItem[] = items.map((it) => {
-      return {
-        ...(it as DataRow),
-        predictedLabel: it.predictedLabel ?? '',
-        probabilities: it.probabilities ?? {}
-      };
-    });
+    // If API scoredItems available with probabilities, normalize and use probabilities
+    if ('scoredItems' in apiResult && Array.isArray((apiResult as any).scoredItems)) {
+      const items = (apiResult as any).scoredItems as (DataRow & { predictedLabel?: string; probabilities?: Record<string, number> })[];
 
-    const sorted = normalized.slice().sort((a, b) => {
-      const pa = a.probabilities?.[label] ?? 0;
-      const pb = b.probabilities?.[label] ?? 0;
-      return pb - pa;
-    });
-    return sorted.slice(0, Math.max(0, topN));
+      // normalize to required ScoredItem type
+      const normalized: ScoredItem[] = items.map((it) => {
+        return {
+          ...(it as DataRow),
+          predictedLabel: it.predictedLabel ?? '',
+          probabilities: it.probabilities ?? {}
+        };
+      });
+
+      // If probabilities contain the requested label, sort by it
+      const hasLabel = normalized.some(it => Object.prototype.hasOwnProperty.call(it.probabilities, label));
+      if (hasLabel) {
+        const sorted = normalized.slice().sort((a, b) => {
+          const pa = a.probabilities?.[label] ?? 0;
+          const pb = b.probabilities?.[label] ?? 0;
+          return pb - pa;
+        });
+        return sorted.slice(0, Math.max(0, topN));
+      }
+
+      // Fallback: filter by price range using priceToLabel
+      const fallback = normalized.filter(it => {
+        const p = parseNumberSafe(it['price_idr'] ?? it['price'] ?? it['price_id'] ?? '');
+        return priceToLabel(p) === (label as 'cheap' | 'mid' | 'premium');
+      }).slice(0, Math.max(0, topN));
+      if (fallback.length > 0) return fallback;
+    }
+
+    // If no scoredItems or not matching, fallback to raw `data` filtering by price
+    if (data && data.length > 0) {
+      const candidates = data.map(d => {
+        const p = parseNumberSafe(d['price_idr'] ?? d['price'] ?? '');
+        const scored: ScoredItem = {
+          ...(d as DataRow),
+          predictedLabel: priceToLabel(p),
+          probabilities: {}
+        };
+        return scored;
+      }).filter(it => it.predictedLabel === label).slice(0, Math.max(0, topN));
+      return candidates;
+    }
+
+    return [] as ScoredItem[];
   }
 
   function onRecommendClick() {
-    if (!apiResult) return alert('Run evaluation first');
+    if (!apiResult && !data) return alert('Run evaluation first or upload data');
     let rec: ScoredItem[] = [];
     if (budget !== null && Number.isFinite(budget)) {
       const label = priceToLabel(budget);
@@ -305,11 +352,11 @@ export default function Page() {
                         <input type="number" value={budget ?? ''} onChange={(e) => setBudget(Number(e.target.value) || null)} className="w-full border rounded px-2 py-1" placeholder="e.g. 10000000" />
                       </div>
                       <div>
-                        <label className="text-xs">Or select class</label>
+                        <label className="text-xs">Or select price class</label>
                         <select value={budgetLabel} onChange={(e) => setBudgetLabel(e.target.value)} className="w-full border rounded px-2 py-1">
-                          {apiResult && typeof apiResult === 'object' && 'model' in apiResult && Array.isArray((apiResult as any).model.classes)
-                            ? (apiResult as any).model.classes.map((c: string) => <option key={c} value={c}>{c}</option>)
-                            : <option value=''>—</option>}
+                          <option value="cheap">cheap (&lt; 5.000.000)</option>
+                          <option value="mid">mid (5.000.000 - 17.000.000)</option>
+                          <option value="premium">premium (&gt; 17.000.000)</option>
                         </select>
                       </div>
                       <div>
