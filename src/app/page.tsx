@@ -27,6 +27,12 @@ type SplitResponse = {
 
 type ApiResponse = SplitResponse | { error?: string };
 
+/** ScoredItem used for RecommendedList: required props enforced */
+type ScoredItem = DataRow & {
+  predictedLabel: string;
+  probabilities: Record<string, number>;
+};
+
 export default function Page() {
   // data + meta
   const [data, setData] = useState<DataRow[] | null>(null);
@@ -43,11 +49,11 @@ export default function Page() {
   const [apiResult, setApiResult] = useState<ApiResponse | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
 
-  // recommendation state
+  // recommendation state — now using ScoredItem to satisfy RecommendedList prop
   const [budget, setBudget] = useState<number | null>(null);
   const [budgetLabel, setBudgetLabel] = useState<string>('');
   const [topN, setTopN] = useState<number>(5);
-  const [recommendedItems, setRecommendedItems] = useState<(DataRow & { predictedLabel?: string; probabilities?: Record<string, number> })[]>([]);
+  const [recommendedItems, setRecommendedItems] = useState<ScoredItem[]>([]);
 
   // callbacks from DatasetPanel
   function handleDataLoaded(d: DataRow[]) {
@@ -92,7 +98,7 @@ export default function Page() {
     setLoading(true);
     setApiResult(null);
     setApiError(null);
-    setRecommendedItems([]);
+    setRecommendedItems([] as ScoredItem[]);
 
     try {
       const payload = {
@@ -154,10 +160,20 @@ export default function Page() {
   }
 
   function recommendByLabel(label: string) {
-    if (!apiResult) return [];
-    if (!('scoredItems' in apiResult) || !Array.isArray((apiResult as any).scoredItems)) return [];
+    if (!apiResult) return [] as ScoredItem[];
+    if (!('scoredItems' in apiResult) || !Array.isArray((apiResult as any).scoredItems)) return [] as ScoredItem[];
     const items = (apiResult as any).scoredItems as (DataRow & { predictedLabel?: string; probabilities?: Record<string, number> })[];
-    const sorted = items.slice().sort((a, b) => {
+
+    // normalize to ScoredItem (ensure required fields exist)
+    const normalized: ScoredItem[] = items.map((it) => {
+      return {
+        ...(it as DataRow),
+        predictedLabel: it.predictedLabel ?? '',
+        probabilities: it.probabilities ?? {}
+      };
+    });
+
+    const sorted = normalized.slice().sort((a, b) => {
       const pa = a.probabilities?.[label] ?? 0;
       const pb = b.probabilities?.[label] ?? 0;
       return pb - pa;
@@ -167,7 +183,7 @@ export default function Page() {
 
   function onRecommendClick() {
     if (!apiResult) return alert('Run evaluation first');
-    let rec: (DataRow & { predictedLabel?: string; probabilities?: Record<string, number> })[] = [];
+    let rec: ScoredItem[] = [];
     if (budget !== null && Number.isFinite(budget)) {
       const label = priceToLabel(budget);
       setBudgetLabel(label);
