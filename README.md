@@ -35,6 +35,15 @@ bun install
 bun run dev
 ```
 
+## Tech Stack
+- Next.js (App Router), Frontend + API
+- React.js (Client components)
+- Tailwind CSS (Framework CSS)
+- Typescript
+- Bun (Runtime, Package Manager, Test Runner, Bundler, dsb)
+- xlsx (Paket/Dependency. Membaca file excel `.xlsx` pada client. Parse Excel di browser / client)
+
+
 ## Struktur Folder
 
 ```
