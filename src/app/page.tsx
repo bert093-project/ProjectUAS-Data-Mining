@@ -8,7 +8,24 @@ import RecommendedList from './components/RecommendedList';
 import type { DataRow } from './naive-bayes/model';
 import { detectColumnTypes, inferCandidateTarget } from './utils/dataUtils';
 
-type ApiResponse = any; // kept flexible for server responses
+type SplitResponse = {
+  mode: 'split';
+  counts: { total: number; train: number; test: number };
+  model: { classes: string[]; featureColumns: string[]; targetColumn: string };
+  eval: {
+    accuracy: number;
+    confusionMatrix: number[][];
+    precisionPerClass: Record<string, number>;
+    recallPerClass: Record<string, number>;
+    f1PerClass: Record<string, number>;
+    macroPrecision?: number;
+    macroRecall?: number;
+    macroF1?: number;
+  };
+  scoredItems: Array<DataRow & { predictedLabel?: string; probabilities?: Record<string, number> }>;
+};
+
+type ApiResponse = SplitResponse | { error?: string };
 
 export default function Page() {
   // data + meta
@@ -39,7 +56,6 @@ export default function Page() {
     setColumns(cols);
     const types = detectColumnTypes(d);
     setColumnTypes(types);
-    // auto-suggest target
     const suggested = inferCandidateTarget(d);
     if (suggested) {
       setTargetColumn(suggested);
@@ -85,7 +101,6 @@ export default function Page() {
         targetColumn,
         eval: cfg
       };
-      // debug log before sending
       console.log('[runEval] payload:', { featureColumns, targetColumn, trainPercent: cfg.trainPercent, rows: (data || []).length });
 
       const res = await fetch('/api/naive-bayes', {
@@ -94,7 +109,6 @@ export default function Page() {
         body: JSON.stringify(payload)
       });
 
-      // debug response status
       console.log('[runEval] response status:', res.status, res.statusText);
 
       const json = await res.json().catch((e) => {
@@ -105,20 +119,21 @@ export default function Page() {
       console.log('[runEval] response json:', json);
 
       if (!res.ok) {
-        const msg = (json && json.error) ? String(json.error) : `HTTP ${res.status}`;
+        const msg = (json && (json as any).error) ? String((json as any).error) : `HTTP ${res.status}`;
         setApiError(msg);
         alert(`Evaluation failed: ${msg}`);
         setApiResult(null);
         return;
       }
 
-      setApiResult(json);
+      setApiResult(json as ApiResponse);
       setApiError(null);
 
-      // set default budgetLabel to first class if available
-      const classes = json && json.model && Array.isArray(json.model.classes) ? json.model.classes as string[] : [];
+      const classes = json && typeof json === 'object' && 'model' in json && Array.isArray((json as any).model.classes)
+        ? (json as any).model.classes as string[]
+        : [];
+
       if (classes.length > 0) setBudgetLabel(classes[0]);
-      // move user to performance tab to see results (if not already)
       setActiveTab('performance');
     } catch (err) {
       console.error('[runEval] error:', err);
@@ -140,7 +155,8 @@ export default function Page() {
 
   function recommendByLabel(label: string) {
     if (!apiResult) return [];
-    const items = Array.isArray(apiResult.scoredItems) ? apiResult.scoredItems as (DataRow & { predictedLabel?: string; probabilities?: Record<string, number> })[] : [];
+    if (!('scoredItems' in apiResult) || !Array.isArray((apiResult as any).scoredItems)) return [];
+    const items = (apiResult as any).scoredItems as (DataRow & { predictedLabel?: string; probabilities?: Record<string, number> })[];
     const sorted = items.slice().sort((a, b) => {
       const pa = a.probabilities?.[label] ?? 0;
       const pb = b.probabilities?.[label] ?? 0;
@@ -167,44 +183,29 @@ export default function Page() {
     if (el) el.scrollIntoView({ behavior: 'smooth' });
   }
 
-  // small UI helpers for showing eval results
+  // small UI helpers for showing eval results (split only)
   function renderEvalSection() {
     if (apiError) {
       return <div className="text-sm text-red-600">Error: {apiError}</div>;
     }
     if (!apiResult) return <div className="text-sm text-slate-600">No evaluation run yet.</div>;
 
-    if (apiResult.mode === 'cv') {
-      // shouldn't happen (we removed CV from UI), but guard anyway
-      const cv = apiResult;
-      return (
-        <div>
-          <div className="mb-2">Cross validation (k = {cv.cvFolds})</div>
-          <div className="mb-2">Mean accuracy: {(cv.cvMean?.accuracy * 100 ?? 0).toFixed(2)}% (std {(cv.cvMean?.accuracyStd * 100 ?? 0).toFixed(2)}%)</div>
-        </div>
-      );
-    } else if (apiResult.mode === 'split') {
-      const sp = apiResult as any;
+    // Only split mode supported in current UI
+    if ('mode' in apiResult && apiResult.mode === 'split') {
+      const sp = apiResult as SplitResponse;
+      const accuracyPct = ((sp.eval?.accuracy ?? 0) * 100);
+      const macroF1Pct = ((sp.eval?.macroF1 ?? 0) * 100);
       return (
         <div>
           <div className="mb-2">Split evaluation</div>
           <div className="mb-2">Total: {sp.counts?.total ?? '?'} — Train: {sp.counts?.train ?? '?'} — Test: {sp.counts?.test ?? '?'}</div>
-          <div className="mb-2">Accuracy: {((sp.eval?.accuracy ?? 0) * 100).toFixed(2)}%</div>
-          <div className="mb-2">Macro F1: {((sp.eval?.macroF1 ?? 0) * 100).toFixed(2)}%</div>
+          <div className="mb-2">Accuracy: {accuracyPct.toFixed(2)}%</div>
+          <div className="mb-2">Macro F1: {macroF1Pct.toFixed(2)}%</div>
         </div>
       );
-    } else if (apiResult.mode === 'manual') {
-      const mn = apiResult as any;
-      return (
-        <div>
-          <div className="mb-2">Manual split evaluation</div>
-          <div className="mb-2">Total: {mn.counts?.total ?? '?'} — Train: {mn.counts?.train ?? '?'} — Test: {mn.counts?.test ?? '?'}</div>
-          <div className="mb-2">Accuracy: {((mn.eval?.accuracy ?? 0) * 100).toFixed(2)}%</div>
-        </div>
-      );
-    } else {
-      return <div className="text-sm text-slate-600">Unknown result format</div>;
     }
+
+    return <div className="text-sm text-slate-600">Unknown result format</div>;
   }
 
   return (
@@ -290,8 +291,8 @@ export default function Page() {
                       <div>
                         <label className="text-xs">Or select class</label>
                         <select value={budgetLabel} onChange={(e) => setBudgetLabel(e.target.value)} className="w-full border rounded px-2 py-1">
-                          {apiResult && typeof apiResult === 'object' && 'model' in apiResult && Array.isArray(apiResult.model?.classes)
-                            ? apiResult.model.classes.map((c: string) => <option key={c} value={c}>{c}</option>)
+                          {apiResult && typeof apiResult === 'object' && 'model' in apiResult && Array.isArray((apiResult as any).model.classes)
+                            ? (apiResult as any).model.classes.map((c: string) => <option key={c} value={c}>{c}</option>)
                             : <option value=''>—</option>}
                         </select>
                       </div>
@@ -314,7 +315,7 @@ export default function Page() {
           </div>
 
           {/* Raw scored items preview (optional) */}
-          {apiResult && typeof apiResult === 'object' && Array.isArray(apiResult.scoredItems) && (
+          {apiResult && typeof apiResult === 'object' && Array.isArray((apiResult as any).scoredItems) && (
             <div className="mt-6 bg-white rounded-2xl shadow p-4">
               <h3 className="font-semibold mb-2">All scored items (preview)</h3>
               <div className="overflow-auto">
@@ -325,7 +326,7 @@ export default function Page() {
                     </tr>
                   </thead>
                   <tbody>
-                    {apiResult.scoredItems.slice(0, 20).map((row: any, i: number) => (
+                    {((apiResult as any).scoredItems as any[]).slice(0, 20).map((row, i) => (
                       <tr key={i}>
                         {columns.map(col => <td key={col} className="border px-2 py-1">{String(row[col] ?? '')}</td>)}
                         <td className="border px-2 py-1">{String(row.predictedLabel ?? '')}</td>
